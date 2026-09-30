@@ -11,6 +11,18 @@ use super::model::{Doc, Entry, Record, Scheme, DEFAULT_SCHEME};
 pub const GROUP_HEAD: &str = "#Group: ";
 const OFF_PREFIX: &str = "#off";
 
+/// 域名 token 白名单：仅允许 ASCII 字母/数字/点/连字符/下划线，总长 ≤ 253。
+/// 三个理由：
+/// 1. 右键 ping 拼接 `cmd /c ping <domain>`，含 `&|^<>%` 等字符即命令注入；
+/// 2. 含空格的“域名”写盘后重载会被 split_whitespace 拆成多条记录（静默变形）；
+/// 3. 含 `#` 的域名写盘重载后被截断成“域名 + 备注”（静默变形）。
+/// 不合白名单的记录行按原样保留（Verbatim），不丢弃、不结构化。
+pub fn is_valid_domain(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 253
+        && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-' || b == b'_')
+}
+
 /// 解码并解析整个 hosts 文件
 pub fn parse_bytes(bytes: &[u8]) -> Doc {
     parse_str(&super::encoding::decode_bytes(bytes))
@@ -76,7 +88,9 @@ fn strip_off_prefix(trimmed: &str) -> Option<&str> {
     rest.starts_with(char::is_whitespace).then_some(rest)
 }
 
-/// 解析记录体：`IP 域名... [#备注]`；一行多域名拆成多条记录
+/// 解析记录体：`IP 域名... [#备注]`；一行多域名拆成多条记录。
+/// 任一域名 token 不在白名单内（空格类已被 split_whitespace 天然隔离，
+/// 这里挡 `&`、`#`、非 ASCII 等）则整行不可解析 → 由调用方原样保留
 fn parse_record_line(line: &str, enabled: bool) -> Option<Vec<Record>> {
     let line = line.trim();
     let (body, comment) = match line.find('#') {
@@ -87,6 +101,9 @@ fn parse_record_line(line: &str, enabled: bool) -> Option<Vec<Record>> {
     let ip: IpAddr = tokens.next()?.parse().ok()?;
     let mut records = Vec::new();
     for domain in tokens {
+        if !is_valid_domain(domain) {
+            return None;
+        }
         records.push(Record {
             ip,
             domain: domain.to_string(),

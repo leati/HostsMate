@@ -156,8 +156,11 @@ pub unsafe fn run_main(file: PathBuf) -> i32 {
         if r.0 <= 0 {
             break if r.0 == 0 { msg.wParam.0 as i32 } else { 1 };
         }
-        // 行内编辑激活时旁路加速键，避免 Del/Ctrl+S 劫持编辑框按键
-        if (*ptr).edit.is_none() {
+        // 行内编辑激活时旁路加速键，避免 Del/Ctrl+S 劫持编辑框按键。
+        // 通过窗口 USERDATA 取指针：WM_NCDESTROY 已释放并清零后，
+        // 队列里残留消息再进循环时裸指针 ptr 是悬垂的
+        let live = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut App;
+        if !live.is_null() && (*live).edit.is_none() {
             TranslateAcceleratorW(hwnd, haccel, &msg);
         }
         let _ = TranslateMessage(&msg);

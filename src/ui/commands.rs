@@ -238,26 +238,42 @@ pub unsafe fn save_file(app: &mut App) {
         return;
     }
 
-    // 2. 写盘：系统 hosts 且非管理员 → 临时文件 + UAC 提权 helper
+    // 2. 写盘：系统 hosts 且非管理员 → 私有目录中转文件 + UAC 提权 helper
     let bytes = hostsmate::engine::generate_bytes(&app.doc);
     let target_is_system = app.path == hostsmate::engine::system_hosts_path();
     let mut dns_note = String::new();
+    let mut leftover_tmp: Option<PathBuf> = None;
     let result = if !target_is_system || app.is_admin {
         app.write_direct()
     } else {
-        let tmp = std::env::temp_dir().join(format!("hostsmate-save-{}.tmp", std::process::id()));
+        // 中转文件不得放共享 %TEMP%：同用户进程可在 UAC 确认窗口期替换内容，
+        // 提权 helper 会把替换后的字节写进系统 hosts。改放私有数据目录，
+        // 并以 SHA-256 锁定内容，helper 校验不过即拒写（替换攻击至多导致本次保存失败）。
+        // 注：ShellExecuteExW(runas) 无法向提权子进程继承句柄，匿名管道在此链路不可行。
+        let _ = std::fs::create_dir_all(&app.data_dir);
+        let tmp = app.data_dir.join(format!("save-{}.tmp", std::process::id()));
+        leftover_tmp = Some(tmp.clone());
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(&bytes);
+        let hex: String = hasher.finalize().iter().map(|b| format!("{b:02x}")).collect();
         if let Err(e) = std::fs::write(&tmp, &bytes) {
             Err(format!("临时文件写入失败：{e}"))
         } else {
             let exe = std::env::current_exe().unwrap_or_default();
-            let args = format!("--write-hosts \"{}\"", tmp.display());
+            let args = format!("--write-hosts \"{}\" {hex}", tmp.display());
             match elevate::elevate_and_wait(&exe, &args, app.hwnd_main) {
                 Ok(0) => Ok(()),
+                Ok(3) => Err("中转文件校验失败（提权前内容被改动），已拒绝写入".into()),
                 Ok(code) => Err(format!("提权写入失败（退出码 {code}）")),
                 Err(e) => Err(e),
             }
         }
     };
+    // helper 成功时会自删中转文件；UAC 取消 / helper 失败 / 写 tmp 失败都可能留下——统一幂等清理
+    if let Some(p) = &leftover_tmp {
+        let _ = std::fs::remove_file(p);
+    }
 
     match result {
         Ok(()) => {
@@ -547,12 +563,43 @@ unsafe fn context_action(
                 copy_to_clipboard(app.hwnd_main, &format!("{}\t{}", r.ip, r.domain));
             }
         }
-        CM_PING => shell_cmd(&format!("/c ping {domain} & pause")),
-        CM_PINGT => shell_cmd(&format!("/c ping -t {domain}")),
-        CM_PING6 => shell_cmd(&format!("/c ping -6 {domain} & pause")),
-        CM_PINGIP => shell_cmd(&format!("/c ping {ip_str} & pause")),
-        CM_OPENHTTP => shell_url(&format!("http://{domain}/")),
+        CM_PING => ping_cmd(&domain),
+        CM_PINGT => ping_t_cmd(&domain),
+        CM_PING6 => ping6_cmd(&domain),
+        CM_PINGIP => ping_cmd(&ip_str),
+        CM_OPENHTTP => open_http(&domain),
         _ => {}
+    }
+}
+
+/// ping 类命令的域名/IP 必须过白名单（ip_str 来自 IpAddr 格式化天然安全；
+/// 域名可能来自外部导入文件，拼接 cmd /c 前再拦一次，纵深防御）
+fn safe_host_arg(s: &str) -> Option<&str> {
+    hostsmate::engine::parser::is_valid_domain(s).then_some(s)
+}
+
+fn ping_cmd(host: &str) {
+    if let Some(h) = safe_host_arg(host) {
+        unsafe { shell_cmd(&format!("/c ping {h} & pause")) };
+    }
+}
+
+fn ping_t_cmd(host: &str) {
+    if let Some(h) = safe_host_arg(host) {
+        unsafe { shell_cmd(&format!("/c ping -t {h}")) };
+    }
+}
+
+fn ping6_cmd(host: &str) {
+    if let Some(h) = safe_host_arg(host) {
+        unsafe { shell_cmd(&format!("/c ping -6 {h} & pause")) };
+    }
+}
+
+fn open_http(domain: &str) {
+    // URL 与命令行同理：域名白名单外的内容不拼进协议处理器
+    if let Some(d) = safe_host_arg(domain) {
+        unsafe { shell_url(&format!("http://{d}/")) };
     }
 }
 

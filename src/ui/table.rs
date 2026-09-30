@@ -37,6 +37,14 @@ use super::draw;
 
 // ---------- 填充 ----------
 
+/// 操作列两个小按钮（编辑/删除）的度量：命中检测与自绘必须共用同一函数，
+/// 两处各算各的曾在 150% DPI 下造成垃圾桶右侧空白也能触发无确认删除
+/// 返回 (按钮宽, 按钮高, 间隙)
+pub(crate) fn action_btn_metrics(dpi: i32) -> (i32, i32, i32) {
+    let u = dpi as f64 / 96.0;
+    ((26.0 * u) as i32, (24.0 * u) as i32, (6.0 * u) as i32)
+}
+
 pub unsafe fn subclass_header(app: &mut App) {
     let header = HWND(SendMessageW(app.hwnd_records, 0x1000 + 31, WPARAM(0), LPARAM(0)).0 as *mut _);
     if header.0.is_null() { return; }
@@ -266,7 +274,8 @@ unsafe fn record_click(app: &mut App, lp: LPARAM) {
         COL_ENABLED => toggle_row(app, row),
         COL_ACTIONS => {
             let Some(&cell) = app.row_map.get(row) else { return };
-            // ptAction 为表客户区坐标；操作列两个小按钮各占一半
+            // ptAction 为表客户区坐标；与自绘共用同一 DPI 与度量，且只认按钮矩形内，
+            // 空白处不触发（否则 150% 缩放下点垃圾桶右侧空白会误删）
             let mut rc = RECT {
                 left: LVIR_BOUNDS as i32,
                 top: COL_ACTIONS as i32,
@@ -278,15 +287,29 @@ unsafe fn record_click(app: &mut App, lp: LPARAM) {
                 WPARAM(row),
                 LPARAM(&mut rc as *mut _ as isize),
             );
-            let dpi = GetDpiForWindow(app.hwnd_main).max(96) as i32;
-            let u = dpi as f64 / 96.0;
-            let bw = (26.0 * u) as i32;
-            let gap = (6.0 * u) as i32;
+            let dpi = GetDpiForWindow(app.hwnd_main).clamp(96, 120) as i32;
+            let (bw, _bh, gap) = action_btn_metrics(dpi);
             let total = bw * 2 + gap;
             let x0 = (rc.left + rc.right - total) / 2;
-            if nmia.ptAction.x < x0 + bw {
+            let x = nmia.ptAction.x;
+            if x < x0 || x >= x0 + total {
+                return; // 按钮带之外：无操作
+            }
+            if x < x0 + bw {
                 start_edit(app, row, COL_DOMAIN);
-            } else {
+            } else if x >= x0 + bw + gap {
+                let r = app.record(cell.0, cell.1);
+                let name = r.map(|r| r.domain.as_str()).unwrap_or("该记录");
+                let msg = HSTRING::from(format!("删除记录 {name} ？"));
+                if MessageBoxW(
+                    app.hwnd_main,
+                    &msg,
+                    w!("确认删除"),
+                    MB_YESNO | MB_ICONQUESTION,
+                ) != IDYES
+                {
+                    return;
+                }
                 app.delete_one(cell);
                 app.busy = true;
                 populate_records(app);
@@ -402,9 +425,7 @@ unsafe fn record_custom_draw(app: &mut App, lp: LPARAM) -> LRESULT {
             COL_ACTIONS => {
                 // 两个小操作按钮：编辑（蓝底铅笔）/ 删除（红底垃圾桶）
                 let u = dpi as f64 / 96.0;
-                let bw = (26.0 * u) as i32;
-                let bh = (24.0 * u) as i32;
-                let gap = (6.0 * u) as i32;
+                let (bw, bh, gap) = action_btn_metrics(dpi);
                 let total = bw * 2 + gap;
                 let mut x = (rc.left + rc.right - total) / 2;
                 let y = (rc.top + rc.bottom - bh) / 2;
@@ -702,6 +723,10 @@ pub(crate) unsafe fn apply_commit(app: &mut App) {
             let d = text.trim().to_string();
             if d.is_empty() {
                 Some(w!("域名不能为空"))
+            } else if !hostsmate::engine::parser::is_valid_domain(&d) {
+                // 域名入库口必须过白名单：含空格/#/& 等字符的“域名”写盘后
+                // 会被重解析变形（拆分/截断），拼接 ping 命令时更是注入面
+                Some(w!("域名只能包含字母、数字、点、连字符、下划线（≤253 字符）"))
             } else {
                 if let Some(r) = app.record_mut(scheme, entry) {
                     r.domain = d;

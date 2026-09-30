@@ -2,6 +2,7 @@
 
 use super::backup::timestamp_name;
 use super::conflict::normalize_domain;
+use super::parser::is_valid_domain;
 use super::*;
 use std::net::IpAddr;
 use std::time::{Duration, SystemTime};
@@ -293,4 +294,64 @@ fn timestamp_conversion() {
     let t = SystemTime::UNIX_EPOCH + Duration::from_secs(1_790_380_800);
     assert_eq!(timestamp_name(t), "20260926-000000");
     assert_eq!(timestamp_name(SystemTime::UNIX_EPOCH), "19700101-000000");
+}
+
+/// 15. 域名白名单：合法域名通过；命令注入与“写盘重载变形”形态全拒。
+/// （`#` 截断形态由入库口拦截——parse 侧 `#` 属注释语法，无法也无需区分）
+#[test]
+fn domain_whitelist() {
+    assert!(is_valid_domain("a.com"));
+    assert!(is_valid_domain("A.COM-2.example"));
+    assert!(is_valid_domain("xn--fiqs8s.example"));
+    assert!(is_valid_domain("_dmarc.example.com"));
+    assert!(is_valid_domain("localhost"));
+    assert!(!is_valid_domain(""));
+    assert!(!is_valid_domain("evil&calc"));
+    assert!(!is_valid_domain("evil|whoami"));
+    assert!(!is_valid_domain("a<b>c"));
+    assert!(!is_valid_domain("a%PATH%"));
+    assert!(!is_valid_domain("a b"));
+    assert!(!is_valid_domain("域名.cn"));
+    assert!(!is_valid_domain(&"x".repeat(254)));
+}
+
+/// 16. 含非法域名 token 的记录行整体按原样保留：不结构化（防注入面）、
+/// 不部分拆用（防丢行）、往返收敛
+#[test]
+fn malicious_domain_lines_preserved_verbatim() {
+    let src = "1.2.3.4 good.com\n1.2.3.4 evil&calc\n2.2.2.2 ok.cn bad;token\n";
+    let doc = parse_str(src);
+    let e = &doc.schemes[0].entries;
+    assert_eq!(e.len(), 3);
+    assert_eq!(rec_of(&e[0]).domain, "good.com");
+    assert_eq!(verb_of(&e[1]), "1.2.3.4 evil&calc", "注入形态应整行原样保留");
+    assert_eq!(verb_of(&e[2]), "2.2.2.2 ok.cn bad;token", "好 token 混坏 token 也整行保留");
+    let g = generate_str(&doc);
+    assert_eq!(parse_str(&g), doc, "含保留行的往返应收敛");
+    assert!(g.contains("1.2.3.4 evil&calc"), "原行内容不得丢失");
+}
+
+/// 17. 提权写盘用的原子替换：内容替换成功、无临时残留、
+/// 目标不存在时失败且不留半成品
+#[test]
+fn replace_file_bytes_atomic() {
+    let dir = std::env::temp_dir().join(format!("hm-test-r-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let target = dir.join("hosts");
+    std::fs::write(&target, "OLD").unwrap();
+    replace_file_bytes(&target, b"NEW").unwrap();
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "NEW");
+    let leftovers: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_name().to_string_lossy().ends_with(".hm-new"))
+        .collect();
+    assert!(leftovers.is_empty(), "替换临时文件应被清理");
+    // 目标不存在（GetNamedSecurityInfo 失败）：报错且不产生残留
+    let missing = dir.join("none");
+    assert!(replace_file_bytes(&missing, b"x").is_err());
+    assert!(!missing.exists());
+    assert!(!dir.join("none.hm-new").exists());
+    let _ = std::fs::remove_dir_all(&dir);
 }

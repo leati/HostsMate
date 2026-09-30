@@ -12,7 +12,7 @@ use windows::Win32::UI::Shell::{
     IsUserAnAdmin, ShellExecuteExW, SEE_MASK_FLAG_NO_UI, SEE_MASK_NOCLOSEPROCESS,
     SHELLEXECUTEINFOW,
 };
-use windows::Win32::UI::WindowsAndMessaging::SW_HIDE;
+use windows::Win32::UI::WindowsAndMessaging::{SW_HIDE, SW_SHOWNORMAL};
 
 pub fn is_admin() -> bool {
     unsafe { IsUserAnAdmin().as_bool() }
@@ -90,15 +90,31 @@ pub fn flushdns() -> Result<(), String> {
     Ok(())
 }
 
-/// 以管理员身份重启自身（成功时调用方应退出当前实例）
+/// 以管理员身份重启自身（成功时调用方应退出当前实例）。
+/// 只负责把提权实例拉起来，不等待——等待会让旧实例在 UAC 确认期间
+/// 冻结 UI 最长 30 秒，且超时被误报为失败、新旧实例并存。
 pub fn admin_restart(hwnd: HWND) -> Result<(), String> {
     let exe = std::env::current_exe().map_err(|e| format!("{e}"))?;
-    elevate_and_wait_ex(&exe, "", hwnd).map(|_| ())
-}
-
-/// runas 但不等待（用于重启自身）；独立于 elevate_and_wait 以复用校验逻辑
-fn elevate_and_wait_ex(exe: &Path, args: &str, hwnd: HWND) -> Result<u32, String> {
-    elevate_and_wait(exe, args, hwnd)
+    let file = HSTRING::from(exe.as_os_str());
+    unsafe {
+        let mut sei = SHELLEXECUTEINFOW {
+            cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
+            fMask: SEE_MASK_FLAG_NO_UI,
+            hwnd,
+            lpVerb: w!("runas"),
+            lpFile: std::mem::transmute(file.as_ptr()),
+            nShow: SW_SHOWNORMAL.0,
+            ..Default::default()
+        };
+        ShellExecuteExW(&mut sei).map_err(|e| {
+            if e.code().0 & 0xFFFF == 1223 {
+                "已取消管理员授权，未重启".to_string()
+            } else {
+                format!("提权重启失败：{e}")
+            }
+        })?;
+    }
+    Ok(())
 }
 
 // HANDLE 在 0.58 中仅用于类型占位，保留导入以备扩展

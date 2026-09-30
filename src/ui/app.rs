@@ -162,10 +162,18 @@ impl CategoryRules {
             .collect()
     }
 
-    /// Vec → 关键词列表文本（设置窗回显用）
+    /// Vec → 关键词列表文本（设置窗回显用）；分隔符字符会被剔除，
+    /// 否则含逗号的关键词存进 ini 后被重新拆分成多个
     pub fn join_list(list: &[String]) -> String {
-        list.join(",")
+        list.iter().map(|s| sanitize_sep(s)).collect::<Vec<_>>().join(",")
     }
+}
+
+/// 剔除 ini 分隔符字符（parse_list 的分隔集），保证“存→读”往返不把一项拆成多项
+fn sanitize_sep(s: &str) -> String {
+    s.chars()
+        .filter(|c| !matches!(c, ',' | '，' | '、' | ';' | '；'))
+        .collect()
 }
 
 fn kw_hit(kw: &str, domain: &str, note: &str) -> bool {
@@ -307,15 +315,18 @@ impl Settings {
     }
 
     pub fn store(&self, dir: &Path) {
+        // 分类名/关键词里的分隔符字符剔除后再存：cat_names/cat_<i> 行都以
+        // 逗号系分隔符拆分，含逗号的名称存进去重读会被拆成多个分类
         let mut text = format!("flushdns={}\nbackup_keep={}\ncat_names={}\n",
             self.flushdns as u32,
             self.backup_keep,
-            self.rules.cats.iter().map(|c| c.name.as_str()).collect::<Vec<_>>().join(","),
+            self.rules.cats.iter().map(|c| sanitize_sep(&c.name)).collect::<Vec<_>>().join(","),
         );
         for (i, c) in self.rules.cats.iter().enumerate() {
             text.push_str(&format!("cat_{}={}\n", i, CategoryRules::join_list(&c.keywords)));
         }
-        if let Err(e) = std::fs::write(Self::path(dir), text) {
+        // 原子写：写一半断电/崩溃时整文件丢失（下次启动回退默认规则）不可接受
+        if let Err(e) = engine::write_atomic(&Self::path(dir), text.as_bytes()) {
             eprintln!("settings 写入失败：{e}");
         }
     }
@@ -368,7 +379,7 @@ pub struct App {
     pub count_enabled: usize,
     pub count_disabled: usize,
     pub count_conflict: usize,
-    /// 外部修改签名（mtime 秒, 长度）
+    /// 外部修改签名（mtime 纳秒, 长度）
     pub ext_sig: Option<(i64, u64)>,
     pub settings: Settings,
     /// 数据目录（便携模式 = exe 旁 HostsMate.data，否则 %APPDATA%\HostsMate）
@@ -461,16 +472,17 @@ impl App {
         Ok(())
     }
 
-    /// 文件签名（mtime 秒, 长度）
+    /// 文件签名（mtime 纳秒, 长度）。亚秒精度必要：同秒内两次外部写入
+    /// （编辑器自动保存等）签名不变会被误判“无外部修改”
     pub fn ext_sig_of(&self, path: &Path) -> Option<(i64, u64)> {
         let md = std::fs::metadata(path).ok()?;
-        let secs = md
+        let nanos = md
             .modified()
             .ok()?
             .duration_since(std::time::UNIX_EPOCH)
             .ok()?
-            .as_secs() as i64;
-        Some((secs, md.len()))
+            .as_nanos() as i64;
+        Some((nanos, md.len()))
     }
 
     /// 冲突缓存重算（规格 §2.3：仅有效启用记录参与，文件顺序首条生效）
@@ -785,6 +797,25 @@ mod rules_tests {
         assert_eq!(loaded.rules.cats[1].keywords, CategoryRules::default().cats[1].keywords);
         assert_eq!(loaded.rules.cats[4].name, "游戏");
         assert_eq!(loaded.rules.cats[4].keywords, vec!["game".to_string(), "play.*".to_string()]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 分类名/关键词含分隔符字符：存盘前剔除，往返不得拆成多项
+    #[test]
+    fn separator_chars_in_names_survive_roundtrip() {
+        let dir = std::env::temp_dir().join(format!("hostsmate_test_sep_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let mut s = Settings::default();
+        s.rules.cats[0].name = "CDN、加速".into();
+        s.rules.cats[0].keywords = vec!["a,b".into(), "静态资源".into()];
+        s.store(&dir);
+        let loaded = Settings::load(&dir);
+        assert_eq!(loaded.rules.cats.len(), s.rules.cats.len(), "含分隔符的分类不得被拆成两个");
+        assert_eq!(loaded.rules.cats[0].name, "CDN加速");
+        assert_eq!(
+            loaded.rules.cats[0].keywords,
+            vec!["ab".to_string(), "静态资源".to_string()]
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

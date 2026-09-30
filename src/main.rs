@@ -10,11 +10,11 @@ use std::path::PathBuf;
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
-    // 提权 helper：把父进程生成的最终字节写入系统 hosts 后立即退出
+    // 提权 helper：<中转文件> <sha256> 校验后原子写入系统 hosts，随即退出
     if args.first().map_or(false, |a| a == "--write-hosts") {
-        let code = match args.get(1) {
-            Some(p) => helper::write_hosts(p),
-            None => 2,
+        let code = match (args.get(1), args.get(2)) {
+            (Some(p), Some(sha)) => helper::write_hosts(p, sha),
+            _ => 2,
         };
         std::process::exit(code);
     }

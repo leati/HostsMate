@@ -15,7 +15,7 @@ pub use conflict::{detect_conflicts, ConflictGroup, ConflictKind, ConflictMember
 pub use encoding::{decode_bytes, encode_utf8};
 pub use model::{Doc, Entry, Record, Scheme, DEFAULT_SCHEME};
 pub use parser::{parse_bytes, parse_str};
-pub use writer::{generate_bytes, generate_str, save_doc, write_atomic};
+pub use writer::{generate_bytes, generate_str, replace_file_bytes, save_doc, write_atomic};
 
 /// 系统 hosts 文件路径（%SystemRoot%\System32\drivers\etc\hosts）
 pub fn system_hosts_path() -> std::path::PathBuf {
