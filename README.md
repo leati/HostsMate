@@ -6,7 +6,7 @@
 ![定位](https://img.shields.io/badge/定位-自用效率工具-blue)
 
 <p align="center">
-  <img src="docs/screenshot-main.png" alt="HostsMate 主界面：工具栏 + 分类筛选 + 记录表格 + 冲突检测" width="900">
+  <img src="assets/screenshot-main.png" alt="HostsMate 主界面：工具栏 + 分类筛选 + 记录表格 + 冲突检测" width="900">
 </p>
 
 ## 功能
